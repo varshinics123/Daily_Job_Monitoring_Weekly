@@ -1,15 +1,16 @@
 
-name: Job Monitoring
+name: Synapse Monitor
 
 on:
   workflow_dispatch:
     inputs:
       report_date:
-        description: "Optional date to monitor (YYYY-MM-DD). Leave blank for previous Monday-Friday."
+        description: "Date to monitor (YYYY-MM-DD). Leave blank for previous Monday-Friday."
         required: false
         type: string
+
   schedule:
-    # Every Monday at 12:00 AM IST = Sunday at 18:30 UTC
+    # Monday at 12:00 AM IST = Sunday at 18:30 UTC
     - cron: '30 18 * * 0'
 
 permissions:
@@ -43,7 +44,7 @@ jobs:
           SYNAPSE_ENDPOINT: ${{ secrets.SYNAPSE_ENDPOINT }}
           REPORT_DATE: ${{ inputs.report_date }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
-        run: python synapse_Weekly_Monitor.py
+        run: python synapse_monitor.py
 
       - name: Upload CSV report
         if: always() && hashFiles('synapse_pipeline_results.csv') != ''
