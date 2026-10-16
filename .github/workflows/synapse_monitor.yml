@@ -1,14 +1,19 @@
-name: Synapse Monitor
+
+name: Job Monitoring
 
 on:
   workflow_dispatch:
-
+    inputs:
+      report_date:
+        description: "Optional date to monitor (YYYY-MM-DD). Leave blank for previous Monday-Friday."
+        required: false
+        type: string
   schedule:
-    - cron: '30 14 * * 1-5'
-      timezone: "Asia/Kolkata"
+    # Every Monday at 12:00 AM IST = Sunday at 18:30 UTC
+    - cron: '30 18 * * 0'
 
-    - cron: '10 18 * * 1-5'
-      timezone: "Asia/Kolkata"
+permissions:
+  contents: read
 
 jobs:
   monitor:
@@ -22,17 +27,28 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
 
       - name: Install dependencies
         run: |
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run Synapse monitor
+      - name: Run Synapse Job Monitoring
         env:
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           SYNAPSE_ENDPOINT: ${{ secrets.SYNAPSE_ENDPOINT }}
-        run: |
-          python synapse_monitor.py
+          REPORT_DATE: ${{ inputs.report_date }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+        run: python synapse_Weekly_Monitor.py
+
+      - name: Upload CSV report
+        if: always() && hashFiles('synapse_pipeline_results.csv') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: synapse-pipeline-results
+          path: synapse_pipeline_results.csv
+          retention-days: 30
