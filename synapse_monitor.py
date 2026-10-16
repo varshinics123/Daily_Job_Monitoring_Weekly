@@ -20,6 +20,7 @@ SYNAPSE_ENDPOINT = os.environ["SYNAPSE_ENDPOINT"].rstrip("/")
 API_VERSION = "2020-12-01"
 SYNAPSE_SCOPE = "https://dev.azuresynapse.net/.default"
 LOCAL_TZ = ZoneInfo("Asia/Kolkata")
+
 CSV_FILE = "synapse_pipeline_results.csv"
 
 MONITORED_PIPELINES = [
@@ -33,9 +34,6 @@ PIPELINE_ORDER = {
     name: index
     for index, name in enumerate(MONITORED_PIPELINES)
 }
-
-REPORT_DATE = os.environ.get("REPORT_DATE", "").strip()
-EVENT_NAME = os.environ.get("GITHUB_EVENT_NAME", "")
 
 COLUMNS = [
     "Pipeline name",
@@ -102,7 +100,7 @@ def duration_seconds(run):
     start = parse_datetime(run.get("runStart"))
     end = parse_datetime(run.get("runEnd"))
 
-    # In-progress runs have no completed duration.
+    # Only completed runs have a final duration.
     if start is None or end is None:
         return None
 
@@ -127,42 +125,53 @@ def iso_utc(dt):
 
 
 # ============================================================
-# DETERMINE REPORTING PERIOD
+# REPORTING PERIOD
 # ============================================================
 
 def get_report_range():
     today = datetime.now(LOCAL_TZ).date()
 
-    if EVENT_NAME == "workflow_dispatch" and REPORT_DATE:
+    report_date = os.environ.get(
+        "REPORT_DATE", ""
+    ).strip()
+
+    event_name = os.environ.get(
+        "GITHUB_EVENT_NAME", ""
+    )
+
+    # A manually selected date produces a single-day report.
+    if event_name == "workflow_dispatch" and report_date:
         try:
             selected_date = datetime.strptime(
-                REPORT_DATE, "%Y-%m-%d"
+                report_date, "%Y-%m-%d"
             ).date()
         except ValueError as exc:
             raise ValueError(
-                "REPORT_DATE must use YYYY-MM-DD format."
+                "Enter the date in YYYY-MM-DD format, "
+                "for example 2026-10-15."
             ) from exc
 
         if selected_date > today:
-            raise ValueError("Future dates cannot be selected.")
+            raise ValueError(
+                "The selected date cannot be in the future."
+            )
 
-        return selected_date, selected_date, "Manual date"
+        return selected_date, selected_date
 
-    # Scheduled run or manual run with date left blank:
-    # previous Monday through Friday.
+    # Otherwise report the previous Monday-Friday.
     current_monday = today - timedelta(days=today.weekday())
     previous_monday = current_monday - timedelta(days=7)
     previous_friday = previous_monday + timedelta(days=4)
 
-    return previous_monday, previous_friday, "Previous week"
+    return previous_monday, previous_friday
 
 
 # ============================================================
-# FETCH ALL SYNAPSE RUN PAGES
+# FETCH ALL PAGES FROM SYNAPSE
 # ============================================================
 
 def get_pipeline_runs(start_date, end_date):
-    token = get_access_token()
+    access_token = get_access_token()
 
     url = (
         f"{SYNAPSE_ENDPOINT}/queryPipelineRuns"
@@ -173,14 +182,15 @@ def get_pipeline_runs(start_date, end_date):
         start_date, time.min
     ).replace(tzinfo=LOCAL_TZ)
 
+    # Exclusive end boundary: midnight after end_date.
     end_ist = datetime.combine(
         end_date + timedelta(days=1), time.min
     ).replace(tzinfo=LOCAL_TZ)
 
-    now_utc = datetime.now(timezone.utc)
     start_utc = start_ist.astimezone(timezone.utc)
     end_utc = min(
-        end_ist.astimezone(timezone.utc), now_utc
+        end_ist.astimezone(timezone.utc),
+        datetime.now(timezone.utc),
     )
 
     if start_utc >= end_utc:
@@ -205,7 +215,7 @@ def get_pipeline_runs(start_date, end_date):
     }
 
     headers = {
-        "Authorization": f"Bearer {token}",
+        "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
     }
 
@@ -232,11 +242,13 @@ def get_pipeline_runs(start_date, end_date):
             all_runs.extend(page_runs)
 
             print(
-                f"Fetched page: {len(page_runs)} runs; "
-                f"total: {len(all_runs)}"
+                f"Fetched {len(page_runs)} runs; "
+                f"total so far: {len(all_runs)}"
             )
 
-            continuation_token = data.get("continuationToken")
+            continuation_token = data.get(
+                "continuationToken"
+            )
 
             if not continuation_token:
                 break
@@ -245,36 +257,39 @@ def get_pipeline_runs(start_date, end_date):
 
 
 # ============================================================
-# FILTER BY PIPELINE START DATE IN IST
+# FILTER BY ACTUAL START DATE IN IST
 # ============================================================
 
 def filter_runs(runs, start_date, end_date):
     filtered = []
 
     for run in runs:
-        if run.get("pipelineName") not in MONITORED_PIPELINES:
+        pipeline_name = run.get("pipelineName", "")
+
+        if pipeline_name not in MONITORED_PIPELINES:
             continue
 
-        start = to_ist(run.get("runStart"))
+        run_start_ist = to_ist(run.get("runStart"))
 
-        if start is None:
+        if run_start_ist is None:
             continue
 
-        if start_date <= start.date() <= end_date:
+        if start_date <= run_start_ist.date() <= end_date:
             filtered.append(run)
 
     return filtered
 
 
 # ============================================================
-# CAPTURA JOB GROUPS FOR AVERAGES
+# AVERAGE GROUPS
 # ============================================================
 
 def get_average_group(run):
     pipeline = run.get("pipelineName")
-    start = to_ist(run.get("runStart"))
 
     if pipeline == "PL_Captura_Snapshots":
+        start = to_ist(run.get("runStart"))
+
         if start is None:
             return None
 
@@ -290,23 +305,22 @@ def get_average_group(run):
 
 
 def calculate_averages(runs):
-    grouped = {}
+    durations = {}
 
     for run in runs:
         seconds = duration_seconds(run)
 
-        # Only completed runs contribute to averages.
         if seconds is None:
             continue
 
         group = get_average_group(run)
 
         if group is not None:
-            grouped.setdefault(group, []).append(seconds)
+            durations.setdefault(group, []).append(seconds)
 
     return {
         group: sum(values) / len(values)
-        for group, values in grouped.items()
+        for group, values in durations.items()
         if values
     }
 
@@ -351,11 +365,11 @@ def get_error_message(run):
 
 
 # ============================================================
-# SORT AND BUILD TABLE
+# SORT RUNS
 # ============================================================
 
 def sort_runs(runs):
-    def key(run):
+    def sort_key(run):
         pipeline = run.get("pipelineName", "")
         start = to_ist(run.get("runStart"))
 
@@ -377,8 +391,12 @@ def sort_runs(runs):
             start or datetime.max.replace(tzinfo=LOCAL_TZ),
         )
 
-    return sorted(runs, key=key)
+    return sorted(runs, key=sort_key)
 
+
+# ============================================================
+# BUILD REPORT
+# ============================================================
 
 def build_report(runs, averages):
     rows = []
@@ -412,34 +430,44 @@ def build_report(runs, averages):
 
 
 # ============================================================
-# PRINT TABLE
+# PRINT TABLE IN GITHUB LOGS
 # ============================================================
 
 def print_table(rows):
-    print()
-    print("SYNAPSE JOB MONITORING RESULTS")
-    print("=" * 180)
+    print("\nSYNAPSE JOB MONITORING RESULTS")
+    print("=" * 100)
 
     if not rows:
         print("No monitored pipeline runs found.")
         return
 
     widths = {
-        col: max(
-            len(col),
-            max(len(str(row.get(col, ""))) for row in rows),
+        column: max(
+            len(column),
+            max(len(str(row.get(column, ""))) for row in rows),
         )
-        for col in COLUMNS
+        for column in COLUMNS
     }
 
-    print(" | ".join(col.ljust(widths[col]) for col in COLUMNS))
-    print("-+-".join("-" * widths[col] for col in COLUMNS))
+    print(
+        " | ".join(
+            column.ljust(widths[column])
+            for column in COLUMNS
+        )
+    )
+
+    print(
+        "-+-".join(
+            "-" * widths[column]
+            for column in COLUMNS
+        )
+    )
 
     for row in rows:
         print(
             " | ".join(
-                str(row.get(col, "")).ljust(widths[col])
-                for col in COLUMNS
+                str(row.get(column, "")).ljust(widths[column])
+                for column in COLUMNS
             )
         )
 
@@ -447,15 +475,19 @@ def print_table(rows):
 
 
 # ============================================================
-# CREATE CSV
+# EXPORT CSV
 # ============================================================
 
 def create_csv(rows):
     with open(
-        CSV_FILE, "w", newline="", encoding="utf-8-sig"
+        CSV_FILE,
+        "w",
+        newline="",
+        encoding="utf-8-sig",
     ) as file:
         writer = csv.DictWriter(
-            file, fieldnames=COLUMNS
+            file,
+            fieldnames=COLUMNS,
         )
         writer.writeheader()
         writer.writerows(rows)
@@ -469,23 +501,26 @@ def create_csv(rows):
 
 def main():
     print("=" * 80)
-    print("Starting Synapse Job Monitoring")
+    print("SYNAPSE JOB MONITOR")
     print("=" * 80)
 
-    start_date, end_date, period_type = get_report_range()
+    start_date, end_date = get_report_range()
 
     print(
         f"Reporting period: {start_date:%d/%m/%Y} "
-        f"to {end_date:%d/%m/%Y} (IST)"
+        f"to {end_date:%d/%m/%Y} IST"
     )
-    print(f"Report mode: {period_type}")
 
     all_runs = get_pipeline_runs(start_date, end_date)
-    print(f"Total API runs received: {len(all_runs)}")
+
+    print(f"Total runs retrieved: {len(all_runs)}")
 
     monitored_runs = filter_runs(
-        all_runs, start_date, end_date
+        all_runs,
+        start_date,
+        end_date,
     )
+
     print(f"Matching monitored runs: {len(monitored_runs)}")
 
     averages = calculate_averages(monitored_runs)
@@ -494,7 +529,7 @@ def main():
     print_table(rows)
     create_csv(rows)
 
-    print("Monitoring completed.")
+    print("\nMonitoring completed successfully.")
 
 
 if __name__ == "__main__":
