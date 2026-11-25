@@ -1,4 +1,3 @@
-
 name: Synapse Monitor
 
 on:
@@ -8,10 +7,6 @@ on:
         description: "Date to monitor (YYYY-MM-DD). Leave blank for previous Monday-Friday."
         required: false
         type: string
-
-  schedule:
-    # Monday at 12:00 AM IST = Sunday at 18:30 UTC
-    - cron: '30 18 * * 0'
 
 permissions:
   contents: read
